@@ -1,0 +1,811 @@
+import math
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
+import copy
+import multiprocessing as mp
+import numpy as np
+import multiprocessing
+from multiprocessing import Pool
+#random.seed(101)
+
+def EvalSubPopulationFitness(EvalFitness_func, sub_pop, x, y_list, fitness_func, const_list, two_arity_func, one_arity_func,term_set):
+    fitness_and_expr_trees = []
+    for chromosome in sub_pop:
+        chromosome_fitness, chromosome_expr_tree = EvalFitness_func(chromosome, x, y_list, fitness_func, const_list, two_arity_func, one_arity_func,term_set)
+        fitness_and_expr_trees.append((chromosome_fitness, chromosome_expr_tree))
+    return fitness_and_expr_trees
+
+
+def EvalFitness(chromosome, x, y_list, fitness_func,const_list,two_arity_func, one_arity_func,term_set):
+    best_expr_trees_list = []  # Store the best expression tree for each gene
+    best_fitnest_list = []  # Store best fitness value for each gene
+
+    # Iterate over each gene in the chromosome
+    for gene_idx, y in enumerate(y_list):
+        best_gene_fitness = None  # Initialize best fitness value for this gene
+        best_expr_tree = None  # Initialize the best expression tree for this gene
+        y = y_list.iloc[:, gene_idx]
+
+        # Evaluate the expression tree in the current gene
+        expr_trees = ChromToET(chromosome[gene_idx],two_arity_func, one_arity_func)
+
+        # print(expr_trees)
+        a = 0
+        for expr_tree in expr_trees:
+            # print(expr_tree)
+            predictions_fitness = []  # Store fitness values for each prediction in current expression tree
+
+            # Iterate over each sample
+            for i in range(len(pd.DataFrame(x))):
+                variable_dict = {}
+                nth_input = 0
+                for term in term_set:
+                    if term != '?':
+                        variable_dict[term] = pd.DataFrame(x).iloc[i, nth_input]
+                        nth_input += 1
+                # print(expr_tree)
+                # Generate predictions for this expression tree
+                prediction = EvaluateET(expr_tree, variable_dict, const_list, two_arity_func, one_arity_func)
+                # print(expr_tree)
+                # print(prediction)
+                # Compute fitness for this expression tree
+                try:
+                    if fitness_func == 'mse':
+                        squared_error = (prediction - float(y[i])) ** 2
+                        fitness = 1000 / (1 + squared_error)
+                        predictions_fitness.append(fitness)
+
+                    elif fitness_func == 'r2':
+                        fitness = r2_result = r2_score([y[i]], [prediction]) * 1000
+                        if r2_result <= 0:
+                            fitness = 1e-6
+                        predictions_fitness.append(fitness)
+                except OverflowError:
+                    # 当计算结果过大时，将适应度设置为0
+                    fitness = 0
+                    predictions_fitness.append(fitness)
+
+
+            import statistics
+            expr_tree_fittess = statistics.mean(predictions_fitness)  # 计算单个表达式在所有数据上的适应度平均值
+            if expr_tree_fittess > a:
+                a = expr_tree_fittess
+                best_expr_tree = expr_tree
+                # print(best_expr_tree)
+        best_fitnest_list.append(a)  # 适应度追好的表达式添加到列表中
+        best_expr_trees_list.append(best_expr_tree)
+        # print(best_expr_trees_list)
+    # Compute the overall fitness of the chromosome across all genes
+    overall_fitness = sum(best_fitnest_list) / len(best_fitnest_list) if best_fitnest_list else 0
+    # Return overall fitness and the best expression tree for each gene
+    return overall_fitness, best_expr_trees_list
+
+
+def ChromToET(chromosome,two_arity_func, one_arity_func):
+    '''Take a string of chromosome change it to
+    a dictionary of expression trees{row:element_on_row}'''
+
+    expr_trees = []
+    start_counter = 0
+
+    while start_counter < len(chromosome):
+        expr_tree = {0: [chromosome[start_counter]]}
+        i = 1
+        start_counter += 1
+        while True:
+            take_next = 0
+            terminal_row = True
+
+            for element in expr_tree[i - 1]:
+                if element in two_arity_func:
+                    terminal_row = False
+                    take_next += 2
+                elif element in one_arity_func:
+                    terminal_row = False
+                    take_next += 1
+
+            if terminal_row == True or start_counter >= len(chromosome):
+                break
+
+            last_counter = start_counter + take_next
+            next_elem = chromosome[start_counter:last_counter]
+            expr_tree[i] = next_elem
+            start_counter = last_counter
+            i += 1
+        expr_trees.append(expr_tree)
+
+    return expr_trees
+
+
+def EvaluateET(expr_tree, variable_dict, const_list, two_arity_func, one_arity_func):
+    '''Take chromosome and terminal variable dictionary{'symbol':value}
+    and perform calculation from the chromosome->ET->calculation->prediction'''
+
+    # Change string to list in each row of ET and change variables to sample value
+
+    # print(population)
+    expr_tree = copy.deepcopy(expr_tree)
+    el_dc = 0
+    for i in range(len(expr_tree)):  # iterate rows
+        el = 0
+        for element in expr_tree[i]:  # iterate elements in a row
+
+            if element in variable_dict.keys():
+                expr_tree[i][el] = str(variable_dict[element])
+            elif element == '?':
+                try:
+                    float(const_list[el_dc])  # Try converting to float
+                    expr_tree[i][el] = str(const_list[el_dc])
+                    el_dc += 1
+                except ValueError:
+                    print(f"Warning: const_list[el_dc] = {const_list[el_dc]} could not be converted to float")
+
+            el += 1
+
+    def operate_two_arity(representation, a, b):  # 双参数运算算子
+        a = float(a)
+        b = float(b)
+
+        if representation == '+':
+            result = a + b
+        elif representation == '-':
+            result = a - b
+        elif representation == '*':
+            result = a * b
+        elif representation == '/':
+            if b == 0:
+                b = 1e-6
+            result = a / b
+
+        return str(result)
+
+    def operate_one_arity(representation, a):  # 单参数运算算子
+        a = float(a)
+
+        if representation == '(sqrt)':
+            if a >= 0:
+                result = a ** 0.5
+            else:
+                result = (abs(a)) ** 0.5
+
+        elif representation == '(sin)':
+            result = math.sin(a)
+
+        elif representation == '(exp)':
+            try:
+                result = math.exp(a)
+            except:
+                result = 1e6
+        elif representation == '(ln)':
+            if a == 0:
+                a = 1e-6
+            elif a < 0:
+                a = abs(a)
+            result = math.log(a, math.e)
+        elif representation == '(inv)':
+            if a == 0:
+                a = 1e-6
+            result = 1 / a
+        elif representation == '(gau)':
+            result = np.random.normal(1)
+        elif representation == '(X2)':
+            try:
+                result = a ** 2
+            except:
+                result = 1e6
+
+        return str(result)
+
+    for row in range(len(expr_tree) - 2, -1, -1):  # iterate rows from second last row to root
+
+        i = 0
+        for element in expr_tree[row]:
+            if element in two_arity_func:
+                a = expr_tree[row + 1][0]
+                b = expr_tree[row + 1][1]
+
+                result = operate_two_arity(element, a, b)
+                # buang 2 elemen pertama di row+1 dan replace elemen pertama di row
+                expr_tree[row + 1] = expr_tree[row + 1][2:]
+                expr_tree[row][i] = result
+
+            elif element in one_arity_func:
+                a = expr_tree[row + 1][0]
+                result = operate_one_arity(element, a)
+                expr_tree[row + 1] = expr_tree[row + 1][1:]
+                expr_tree[row][i] = result
+
+            i += 1
+
+    prediction = float(expr_tree[0][0])
+    return prediction
+
+
+class GeneExpressionProgramming():    #定义函数
+
+    def __init__(self, nhead, func_set, term_set, const_range, operator_probabilities):#包含的函数变量
+
+        self.gen_pop_fit_history = {}   #储存种群历史记录
+        self.ngenerations = None      #子代
+        self.nhead = nhead            #头部基因长度
+
+        self.func_set = func_set     #数学函数集合
+        self.term_set = term_set      #变量或常量集合
+
+        self.one_arity_func = ['(sqrt)', '(sin)', '(cos)','(exp)', '(ln)', '(inv)', '(gau)', '(X2)']
+        self.two_arity_func = ['+', '-', '*', '/']
+
+        self.max_arity = 1
+        for func in func_set:
+            if func in self.two_arity_func:
+                self.max_arity = 2
+                break                                        #如果只有one_arity_func中的函数算子，n=1，否则n=2
+
+        self.ntail = self.nhead * (self.max_arity - 1) + 1   #基因尾部长度t=h*(n-1)+1
+        self.chrom_length =3 * ( self.nhead + self.ntail )         #染色体长度=h+t
+        self.gene_length = self.nhead + self.ntail
+
+        self.dc_length = self.ntail                          #附加DC域，常数量 常数量的常速最大等于尾部基因长度，所以直接设DC域=尾部基因长度
+        self.total1_length = self.gene_length+self.dc_length
+        self.total_length = 3 * (self.gene_length+self.dc_length)
+        self.const_list = np.random.uniform(const_range[0],const_range[1],self.dc_length)    #np.random.uniform(low，high，size)元素值的范围包含low，不包含high
+        #self.const_list = [3.0,1.1,4.0,1.1,4.0,1.1,4.0,1.1]                                 #产生常数量值    这些常量值是在指定的常量范围内使用 NumPy 库随机生成的
+
+        self.operator_probabilities = operator_probabilities                                 #表示每个操作符被使用的概率。
+
+
+    def VisualizeResults(self):
+        ##Visualize results: plot [averagefitness, best fitness] vs generation
+        average_fitness = [np.mean(self.gen_pop_fit_history[i]['Mean Fitness']) for i in range(self.ngenerations + 1)]
+        max_fitness = [np.mean(self.gen_pop_fit_history[i]['Max Fitness Value']) for i in range(self.ngenerations + 1)]
+
+        generation = [i for i in range(self.ngenerations + 1)]
+        plt.plot(generation, average_fitness, label='Avg Fitness', marker='.')
+        plt.plot(generation, max_fitness, label='Max Fitness', marker='.')
+        plt.legend()
+        plt.xlabel('Generation')
+        plt.ylabel('Fitness Value (Max 1000)')
+        plt.title('Average Fitness Value vs Generation')
+        plt.savefig('Average Fitness Value vs Generation.png')
+        plt.show()
+
+        average_fitness_mse = [np.mean(self.gen_pop_fit_history[i]['Mean mse']) for i in range(self.ngenerations + 1)]
+        max_fitness_mse = [np.mean(self.gen_pop_fit_history[i]['Fittest mse']) for i in range(self.ngenerations + 1)]
+        #plt.plot(generation, average_fitness_mse, label='Avg MSE', marker='.')
+        plt.plot(generation, max_fitness_mse, label='Fittest MSE', marker='.')
+        plt.legend()
+        plt.xlabel('Generation')
+        plt.ylabel('Fitness Value (Min 0)')
+        plt.title('Average MSE vs Generation')
+        plt.savefig('Average MSE vs Generation.png')
+        plt.show()
+
+    def RunGEP(self, x, y_list, popsize, ngenerations, fitness_func):  # 种群规模，迭代次数，……
+
+        def AddGenInfo(gen_pop_fit_history, generation, population, fitness, fitness_mse):
+
+            '''Add an entry to the generation:{population,history} info dictionary
+                       from current generation, population ORF list and fitness list'''
+            import statistics  # statistics，用于计算适应度的平均值和平均误差方差的平均值
+            gen_pop_fit_history[generation] = {
+                'Population': population,
+                'Fitness': fitness,
+                'Max Fitness Value': max(fitness),
+                'Fittest Chromosome': population[fitness.index(max(fitness))].copy(),
+                'Mean Fitness': statistics.mean(fitness),
+                'Fittest mse': min(fitness_mse),
+                'Mean mse': statistics.mean(fitness_mse)
+            }
+
+            return gen_pop_fit_history
+
+
+
+
+
+
+        def InitializePopulation(popsize):  # 初始化种群  popsize种群大小
+            '''Initialize a list of population sized popsize randomly'''
+
+            population = []  # 定义了一个空的列表population来存放初始化后的种群
+
+            func_term_set = self.func_set * 10 + self.term_set
+
+            for i in range(popsize):
+                # create a chromosome with three genes
+                chromosome = []
+                for _ in range(3):  # three genes for three color concentrations
+                    # create head
+                    gene = []
+                    for i in range(self.nhead):
+                        gene.append(random.choice(func_term_set))
+
+                    # create tail
+                    for i in range(self.ntail):
+                        gene.append(random.choice(self.term_set))
+
+                    # concatenate head+tail
+                    # gene = list(head +
+                    for i in range(self.dc_length):
+                        gene.append(str(random.randint(0, self.dc_length - 1)))
+
+                    # add gene to chromosome
+                    chromosome.append(gene.copy())
+
+                # add to population
+                population.append(chromosome.copy())
+
+            return population
+
+
+        def Selection(population, fitness):#选择
+            '''Perform selection by roulette wheel'''
+
+            # compute total fitness for each chromosome
+            #total_fitness = [sum(fitnesses) / 3 for fitnesses in fitness]  # compute average fitness for each chromosome
+
+            new_population = random.choices(population, weights=fitness, k=len(population))  # weighted random choice
+            return new_population
+
+        def Replication(population):
+            '''Perform replication(not necessary)'''
+            new_population = population
+            return new_population
+
+
+        def Mutation(population, mutation_rates):  # 变异
+            '''Perform one point Mutation'''  # 一点变异
+            import random
+            new_population = []
+
+            for idx, chromosome in enumerate(population):
+                mutation_rate = mutation_rates[idx]
+                for gene_index, gene in enumerate(chromosome):  # go through each gene in the chromosome
+                    #print(gene_index, gene)
+                    mutate = random.random() < mutation_rates[idx]
+                    if mutate == True:
+                        index = random.randint(0, self.gene_length - 1)
+                        if index < self.nhead:  # if randomizer picks to mutate head region
+                            gene[index] = random.choice(self.func_set * 10 + self.func_set)
+                        elif index >= self.nhead:  # if randomizer picks to mutate tail region
+                            gene[index] = random.choice(self.term_set)
+                        # Mutation for constant domain
+                        index_dc = -random.randint(1, self.dc_length)
+                        gene[index_dc] = str(random.randint(0, self.dc_length - 1))
+
+                        # replace the mutated gene in the chromosome
+                        chromosome[gene_index] = gene
+
+                new_population.append(chromosome.copy())
+
+            return new_population
+
+        def Inversion(population, probability):
+            '''Perform inversion at head'''
+            import random
+            new_population = []
+
+            for chromosome in population:
+                for gene_index, gene in enumerate(chromosome):  # go through each gene in the chromosome
+                    inverse = random.random() < probability
+                    if inverse == True:
+                        # Pick sequence to be inverted by picking random index
+                        indexes = sorted(random.sample(range(0, self.nhead - 1), 2))
+                        start_index = indexes[0]
+                        end_index = indexes[1]
+
+                        inverse_seq = gene[start_index:end_index + 1]
+
+                        # Create inverted sequence
+                        inverted_seq = inverse_seq[::-1]
+
+                        # Plug in and replace inverted sequence to the gene
+                        gene[start_index:end_index + 1] = inverted_seq
+
+                        # add inversion for constant domain !!
+                        indexes_dc = sorted(
+                            random.sample(range(self.gene_length, self.gene_length + self.dc_length), 2))
+                        start_index_dc = indexes_dc[0]
+                        end_index_dc = indexes_dc[1]
+
+                        inverse_seq_dc = gene[start_index_dc:end_index_dc + 1]
+                        inverted_seq_dc = inverse_seq_dc[::-1]
+                        gene[start_index_dc:end_index_dc + 1] = inverted_seq_dc
+
+                        # replace the inverted gene in the chromosome
+                        chromosome[gene_index] = gene
+
+                new_population.append(chromosome.copy())
+
+            return new_population
+
+        def ISTransposition(population, probability):
+            '''Perform IS Transposition short seq from tail to head'''
+            new_population = []
+            for chromosome in population:
+                for gene_index, gene in enumerate(chromosome):  # go through each gene in the chromosome
+                    transpose = random.random() < probability
+                    if transpose == True:
+                        max_seq_len = self.ntail // 3
+
+                        if self.ntail == 1:
+                            seq_len = 1
+                        else:
+                            seq_len = random.randint(1, max_seq_len)
+
+                        start_index = random.randint(self.nhead, self.gene_length - seq_len)
+                        end_index = start_index + seq_len - 1
+
+                        transpose_seq = gene[start_index:end_index + 1]
+
+                        insert_start_index = random.randint(1, self.nhead - 1)
+
+                        # insert the transposed sequence into the head region of the gene
+                        i = insert_start_index
+                        for element in transpose_seq:
+                            gene[i] = element
+                            i += 1
+
+                        # replace the transposed gene in the chromosome
+                        chromosome[gene_index] = gene
+
+                new_population.append(chromosome.copy())
+
+            return new_population
+
+        def RISTransposition(population, probability):
+            '''Perform Root IS Transposition'''
+            new_population = []
+            for chromosome in population:
+                for gene_index, gene in enumerate(chromosome):  # go through each gene in the chromosome
+                    transpose = random.random() < probability
+                    if transpose == True:
+                        max_seq_len = self.nhead // 3
+                        seq_len = random.randint(1, max_seq_len)
+
+                        isFunction = False
+                        trial = 0
+                        while isFunction == False:
+                            start_index = random.randint(1, self.nhead - 1)
+                            if gene[start_index] in self.func_set:
+                                break
+                            if trial > 10:  # check if no function at all in head, break
+                                break
+                            trial += 1
+
+                        end_index = start_index + seq_len - 1
+
+                        transpose_seq = gene[start_index:end_index + 1]
+
+                        # replace the root of the gene with the transposed sequence
+                        i = 0
+                        for element in transpose_seq:
+                            gene[i] = element
+                            i += 1
+
+                        # replace the transposed gene in the chromosome
+                        chromosome[gene_index] = gene
+
+                new_population.append(chromosome.copy())
+
+            return new_population
+
+        def GeneTransposition(population):
+            '''Perform replication'''
+            new_population = population
+            return new_population
+
+        def OnePointRecombination(population,probability):
+            '''Perform OnePoint Recombination'''
+            new_population = []
+            recombination_pool = []
+
+            for chromosome in population:  # Choose chromosomes to recombine
+                recombine = random.random() < probability
+                if recombine == True:
+                    recombination_pool.append(chromosome.copy())
+                elif recombine == False:
+                    new_population.append(chromosome.copy())
+
+            if len(recombination_pool) == 1:  # If only 1 to recombine, return it
+                        new_population.append(recombination_pool[0].copy())
+
+            while len(recombination_pool) > 1:
+                if len(recombination_pool) > 2:  # Determine which chromosome by index to recombine
+                    indexes = sorted(random.sample(range(0, len(recombination_pool) - 1), 2))
+                    first_parent = recombination_pool[indexes[0]].copy()
+                    second_parent = recombination_pool[indexes[1]].copy()
+                    recombination_pool.pop(indexes[0])
+                    recombination_pool.pop(indexes[1] - 2)
+
+                elif len(recombination_pool) == 2:
+                    first_parent = recombination_pool[0]
+                    second_parent = recombination_pool[1]
+
+                first_child = [[] for _ in range(3)]
+                second_child = [[] for _ in range(3)]
+
+
+
+                # Now, perform the recombination for each gene in the chromosome independently
+                for gene_index in range(3):
+
+                    # Head and tail domain recombination
+                    recombination_start_index = random.randint(1, self.gene_length - 2)
+                    # recombination_start_index = random.randint(1, len(chromosome)-2)
+                    first_child[gene_index] = first_parent[gene_index][0:recombination_start_index]
+                    # print(first_child[gene_index])
+                    second_child[gene_index] = second_parent[gene_index][0:recombination_start_index]
+                    # print(second_child[gene_index])
+                    first_cross = first_parent[gene_index][recombination_start_index:]
+                    second_cross = second_parent[gene_index][recombination_start_index:]
+
+                    for element in second_cross:
+                        first_child[gene_index].append(element)
+                    for element in first_cross:
+                        second_child[gene_index].append(element)
+
+                    # Constant domain recombination
+                    recombination_start_index_dc = random.randint(self.gene_length + 1,
+                                                                  self.gene_length + self.dc_length - 2)
+                    first_child[gene_index]= first_parent[gene_index][0:recombination_start_index_dc]
+                    second_child[gene_index] = second_parent[gene_index][0:recombination_start_index_dc]
+
+                    first_cross = first_parent[gene_index][recombination_start_index_dc:]
+                    second_cross = second_parent[gene_index][recombination_start_index_dc:]
+
+                    for element in second_cross:
+                        first_child[gene_index].append(element)
+                    for element in first_cross:
+                        second_child[gene_index].append(element)
+                    ######
+
+                new_population.append(first_child.copy())
+                new_population.append(second_child.copy())
+
+            return new_population
+
+        def TwoPointRecombination(population,probability):
+            '''Perform TwoPoint Recombination'''
+            new_population = []
+            recombination_pool = []
+            for chromosome in population:  # Choose chromosomes to recombine
+                recombine = random.random() < probability
+                if recombine == True:
+                    recombination_pool.append(chromosome.copy())
+                elif recombine == False:
+                    new_population.append(chromosome.copy())
+
+            if len(recombination_pool) == 1:  # If only 1 to recombine, return it
+                new_population.append(recombination_pool[0].copy())
+
+            while len(recombination_pool) > 1:
+                if len(recombination_pool) > 2:  # Determine which chromosome by index to recombine
+                    indexes = sorted(random.sample(range(0, len(recombination_pool) - 1), 2))
+                    first_parent = recombination_pool[indexes[0]].copy()
+                    second_parent = recombination_pool[indexes[1]].copy()
+                    recombination_pool.pop(indexes[0])
+                    recombination_pool.pop(indexes[1] - 2)
+
+                elif len(recombination_pool) == 2:
+                    first_parent = recombination_pool[0]
+                    second_parent = recombination_pool[1]
+
+                first_child = [[] for _ in range(3)]
+                second_child = [[] for _ in range(3)]
+
+                for i in range(3):  # Three genes
+                    recombination_indexes = sorted(random.sample(range(1, self.gene_length - 2), 2))
+                    recombination_indexes_dc = sorted(
+                        random.sample(range(self.gene_length + 1, self.total1_length - 2), 2))
+                    recombination_start_index = recombination_indexes[0]
+                    recombination_end_index = recombination_indexes[1]
+                    recombination_start_index_dc = recombination_indexes_dc[0]
+                    recombination_end_index_dc = recombination_indexes_dc[1]
+
+                    first_end_original = first_parent[i][recombination_end_index + 1:self.gene_length]
+                    second_end_original = second_parent[i][recombination_end_index + 1:self.gene_length]
+                    first_end_original_dc = first_parent[i][recombination_end_index_dc + 1:]
+                    second_end_original_dc = second_parent[i][recombination_end_index_dc + 1:]
+
+                    first_child[i] = first_parent[i][0:recombination_start_index]
+                    second_child[i] = second_parent[i][0:recombination_start_index]
+                    first_child_dc = first_parent[i][self.gene_length:recombination_start_index_dc]
+                    second_child_dc = second_parent[i][self.gene_length:recombination_start_index_dc]
+
+                    first_cross = first_parent[i][recombination_start_index:recombination_end_index + 1]
+                    second_cross = second_parent[i][recombination_start_index:recombination_end_index + 1]
+                    first_cross_dc = first_parent[i][recombination_start_index_dc:recombination_end_index_dc + 1]
+                    second_cross_dc = second_parent[i][recombination_start_index_dc:recombination_end_index_dc + 1]
+
+                    for element in second_cross:
+                        first_child[i].append(element)
+                    for element in first_cross:
+                        second_child[i].append(element)
+
+                    for element in first_end_original:
+                        first_child[i].append(element)
+                    for element in second_end_original:
+                        second_child[i].append(element)
+
+                    for element in first_child_dc:
+                        first_child[i].append(element)
+                    for element in second_cross_dc:
+                        first_child[i].append(element)
+                    for element in first_end_original_dc:
+                        first_child[i].append(element)
+
+                    for element in second_child_dc:
+                        second_child[i].append(element)
+                    for element in first_cross_dc:
+                        second_child[i].append(element)
+                    for element in second_end_original_dc:
+                        second_child[i].append(element)
+
+                new_population.append(first_child.copy())
+                new_population.append(second_child.copy())
+
+                if len(recombination_pool) == 1:
+                    new_population.append(recombination_pool[0].copy())
+                    break
+                elif len(recombination_pool) == 2:
+                    break
+
+            return new_population
+
+        def GeneRecombination(population, recombination_rate):
+            '''Perform Gene Recombination in multi-gene chromosomes'''
+            import random
+
+            new_population = population.copy()
+
+            for i in range(len(new_population)):
+                # Determine whether to recombine based on recombination rate
+                if random.random() < recombination_rate:
+                    # Randomly select another chromosome from the population
+                    other = random.choice(new_population)
+                    # Randomly select a gene index for recombination
+                    gene_index = random.randint(0, len(new_population[i]) - 1)
+                    # Swap the genes at the selected gene index
+                    new_population[i][gene_index], other[gene_index] = other[gene_index], new_population[i][gene_index]
+
+            return new_population
+
+        def compute_mutation_rate(chro_fitness, min_rate, max_rate):#自适应变异策略
+            """Compute mutation rate based on fitness. Lower fitness results in higher mutation rate."""
+            fitness_normalized = (chro_fitness - min(fitness)) / (max(fitness) - min(fitness)) if max(fitness) > min(
+                fitness) else 1
+            return min_rate + (1 - fitness_normalized) * (max_rate - min_rate)
+
+
+
+        def update_recombination_probability(current_probability, diversity, upper_threshold, lower_threshold):#自适应交叉概率策略
+            # Update recombination probability based on diversity
+            if diversity > upper_threshold:
+                return current_probability * 0.9  # decrease recombination probability
+            elif diversity < lower_threshold:
+                return current_probability * 1.1  # increase recombination probability
+            else:
+                return current_probability
+
+
+
+
+
+
+        print(f'''
+=========================================================
+Starting Gene Expression Programming Process
+Population size:{popsize}
+Generations:{ngenerations}
+Function set: {self.func_set}
+Terminal set: {self.term_set}
+Chromosome length: {self.chrom_length}
+gene length:{self.gene_length}
+Constant list: {self.const_list}
+=========================================================
+        ''')
+        self.ngenerations = ngenerations
+        # Initialize a population
+        population = InitializePopulation(popsize).copy()
+        print('Population initialized')
+        generation = 0
+        all_expr_trees_per_gen = []
+        # 获取 CPU 数量
+        cpu_count = mp.cpu_count()
+        print(cpu_count)
+        while generation <= ngenerations:
+            # 分割种群
+            sub_populations = np.array_split(population, cpu_count)
+            sub_populations = [sub.tolist() for sub in sub_populations]
+            pool = mp.Pool(cpu_count)
+            # 并行计算每个子种群的适应度
+            fitness_and_expr_trees_list = pool.starmap(EvalSubPopulationFitness,
+                                                       [(EvalFitness, sub_pop, x, y_list, fitness_func, self.const_list,
+                                                         self.two_arity_func, self.one_arity_func,self.term_set) for sub_pop in
+                                                        sub_populations])
+            # 将结果从子种群级别的列表合并为种群级别的列表
+            fitness_and_expr_trees = [item for sublist in fitness_and_expr_trees_list for item in sublist]
+            pool.close()
+            pool.join()
+            fitness = [fe[0] for fe in fitness_and_expr_trees]
+            expr_trees = [fe[1] for fe in fitness_and_expr_trees]
+            all_expr_trees_per_gen.append(expr_trees)
+            fitness_np = np.array(fitness)
+            std_dev = np.std(fitness_np)#求标准差
+            print(std_dev)
+            current_probability = update_recombination_probability(self.operator_probabilities['current_probability'],
+                                                                   std_dev, self.operator_probabilities['upper_threshold'],
+                                                                   self.operator_probabilities['lower_threshold'])
+            fitness_mse = list((1000 / np.array(fitness.copy())) - 1).copy()
+            print(f'Gen:{generation} Fitness Calculation completed')
+
+            self.gen_pop_fit_history = AddGenInfo(self.gen_pop_fit_history, generation, population,
+                                                  fitness, fitness_mse)
+            gen_fittest = self.gen_pop_fit_history[generation]['Fittest Chromosome'].copy()
+            copied_list = copy.deepcopy(self.gen_pop_fit_history[generation]['Fittest Chromosome'].copy())
+            gen_fittest = [''.join(gene) for gene in gen_fittest]
+
+            fittest_value = self.gen_pop_fit_history[generation]['Max Fitness Value']
+            fittest_mse = self.gen_pop_fit_history[generation]['Fittest mse']
+            print(
+                f'Gen:{generation} Fittest chromosome:({gen_fittest})     Fitness value:{fittest_value}       MSE:{fittest_mse}')
+            if generation == ngenerations:
+                break
+
+            mutation_rates = [compute_mutation_rate(fit, self.operator_probabilities['min_rate'],
+                                                    self.operator_probabilities['max_rate']) for fit in fitness]  ## Entering new generation process
+            # Selection (to choose parents and construct parent populations to reproduce)
+            population = Selection(population, fitness)
+            print(
+                f'--------------------------------------------------------\nGen:{generation + 1}\nSelection from generation {generation} for generation {generation + 1} completed')
+            # Replication
+            population = Replication(population)
+            print(f'Gen:{generation + 1} Reproduction process begin !')
+            # Mutation
+            population = Mutation(population, mutation_rates)
+            print(f'Gen:{generation + 1} Mutation completed')
+            # Inversion
+            population = Inversion(population, self.operator_probabilities['Inversion'])
+            print(f'Gen:{generation + 1} Inversion completed')
+            # IS Transposition
+            population = ISTransposition(population, self.operator_probabilities['IS Transposition'])
+            print(f'Gen:{generation + 1} IS Transposition completed')
+            # RIS Transposition
+            population = RISTransposition(population, self.operator_probabilities['RIS Transposition'])
+            print(f'Gen:{generation + 1} RIS Transposition completed')
+            # Gene Transposition
+            population = GeneTransposition(population)
+            # #One-point Recombination
+            # population = OnePointRecombination(population, current_probability)
+            # print(f'Gen:{generation + 1} One-point Recombination completed')
+            # #Two-point Recombination
+            # population = TwoPointRecombination(population, current_probability)
+            # print(f'Gen:{generation + 1} Two-point Recombination completed')
+            # Gene Recombination
+            population = GeneRecombination(population, self.operator_probabilities['recombination_rate'])
+            print(f'Gen:{generation + 1} Reproduction process done !')
+            population[0] = copied_list
+            # Perform elitism
+            # population[0] = copied_list
+            print(f'Elitism: Gen {generation} --> Gen {generation + 1}')
+            generation += 1  # generation +1 End of a new generation
+
+        final_fittest_list = self.gen_pop_fit_history[ngenerations]['Fittest Chromosome']
+        index_of_fittest_in_final_gen = fitness.index(max(fitness))
+        final_fittest_expr_trees = all_expr_trees_per_gen[-1][index_of_fittest_in_final_gen]
+
+        final_fittest = [''.join(gene) for gene in final_fittest_list]
+        final_fitness = self.gen_pop_fit_history[ngenerations]['Max Fitness Value']
+        print(f'''
+                    =========================================================
+                    Completed Gene Expression Programming Process
+                    Fittest Chromosome Result:({final_fittest}) with fitness value {final_fitness}
+                    =========================================================
+                            ''')
+        f = open("result.txt", "w+")
+        f.write(
+            f"After {generation} generations, fittest Chromosome Result:({final_fittest}) with fitness value {final_fitness}\n in list {final_fittest_list}\n constant list: {list(self.const_list)}\nExpression Tree: {final_fittest_expr_trees}")
